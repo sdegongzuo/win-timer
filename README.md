@@ -1,0 +1,61 @@
+# win-timer
+
+管理本机 Windows 计划任务的轻量控制台：列表、新建、启用/禁用、立即运行、删除。
+
+后端 Rust + axum 直连本机 Task Scheduler，前端 Vue 3 + Vite。
+
+## 快速开始
+
+```bash
+# 终端 1 - 后端（监听 http://127.0.0.1:8080）
+cd win-timer
+cargo run
+
+# 终端 2 - 前端
+cd win-timer/web
+pnpm install
+pnpm dev
+```
+
+打开 http://localhost:5173 。
+
+> 读取任务一般不需要管理员权限；在根目录 `\` 下**新建/删除**任务建议用管理员终端启动后端。
+
+## 功能
+
+- 任务列表：名称、路径、状态、上次/下次运行时间、上次结果、执行的程序与参数；每 15 秒自动刷新。
+- 作用域切换：`根目录任务`（仅 `\`）与 `全部任务`（含所有子文件夹）。
+- 新建任务：一次性、按间隔重复（每 N 分钟）、每天三种调度；可填程序、参数、说明。
+- 操作：运行 / 停止 / 启用 / 禁用 / 删除（删除有二次确认）。
+
+## 结构
+
+```
+win-timer/
+├── Cargo.toml
+├── src/
+│   ├── main.rs        # axum 路由与统一错误响应
+│   └── tasks.rs       # PowerShell 脚本构造 + 单元测试
+├── web/               # Vue 3 前端
+├── e2e_smoke.py       # 端到端冒烟脚本
+└── AGENTS.md          # 给 AI Agent 的项目约定
+```
+
+## 测试
+
+```bash
+cargo test                  # 18 项单元测试，含 2 项真跑 PowerShell 的集成测试
+cargo test -- --ignored     # 额外跑需要访问计划任务服务的测试
+cd web && pnpm build        # vue-tsc + vite 构建
+python e2e_smoke.py         # 端到端冒烟（后端需先启动；会临时创建并删除 win-timer-selftest）
+```
+
+## 常见问题
+
+**页面提示"后端未连接"** —— 后端没起。`cd win-timer && cargo run`，确认 8080 端口未被占用。
+
+**创建任务失败并提示"拒绝访问"** —— 用管理员终端重新启动后端。
+
+**列表为空** —— 默认只看根目录 `\`，点一下"全部任务"。
+
+更多约定见 [AGENTS.md](./AGENTS.md)。
