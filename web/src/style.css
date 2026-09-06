@@ -127,7 +127,6 @@ body {
   flex: 1;
   padding: 20px 28px 40px;
   width: 100%;
-  max-width: 1400px;
   margin: 0 auto;
 }
 
@@ -462,7 +461,7 @@ fieldset.schedule legend {
 
 /* history modal */
 .history-modal {
-  width: 820px;
+  width: min(1400px, 94vw);
 }
 .history-table-wrap {
   border: 1px solid var(--border);
