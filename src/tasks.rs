@@ -21,6 +21,12 @@ pub struct TaskSummary {
     pub executable: Option<String>,
     pub arguments: Option<String>,
     pub description: Option<String>,
+    /// 触发器类型推导："once" | "daily" | "interval" | "unknown"（开机/登录等非时间触发）
+    pub schedule_type: Option<String>,
+    /// 重复间隔（分钟），仅 interval 类型有值
+    pub interval_minutes: Option<u32>,
+    /// 触发器 StartBoundary（本地时间）
+    pub start_boundary: Option<String>,
 }
 
 /// 单次执行记录（来自任务计划程序事件日志，按 TaskExecutionId 关联）。
@@ -57,6 +63,16 @@ pub struct Schedule {
 #[derive(Deserialize, Debug)]
 pub struct CreateTaskRequest {
     pub name: String,
+    pub program: String,
+    #[serde(default)]
+    pub arguments: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub schedule: Schedule,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct UpdateTaskRequest {
     pub program: String,
     #[serde(default)]
     pub arguments: Option<String>,
@@ -142,6 +158,23 @@ try {{
       }}
       try {{ $res = [long]$info.LastTaskResult }} catch {{}}
     }}
+    $stype = 'unknown'
+    $ivmin = $null
+    $start = $null
+    $trig0 = $null
+    if ($null -ne $t.Triggers -and $t.Triggers.Count -gt 0) {{ $trig0 = $t.Triggers[0] }}
+    if ($null -ne $trig0) {{
+      # StartBoundary 从 CIM 返回的是字符串（可能带时区偏移），先转 datetime 再格式化
+      try {{ $start = ([datetime]$trig0.StartBoundary).ToString('yyyy-MM-ddTHH:mm:ss') }} catch {{}}
+      if ($null -ne $trig0.Repetition -and $null -ne $trig0.Repetition.Interval -and $trig0.Repetition.Interval -ne [timespan]::Zero) {{
+        $stype = 'interval'
+        try {{ $ivmin = [int]$trig0.Repetition.Interval.TotalSeconds }} catch {{}}
+      }} elseif ($trig0.CimClass.CimClassName -eq 'MSFT_TaskDailyTrigger') {{
+        $stype = 'daily'
+      }} else {{
+        $stype = 'once'
+      }}
+    }}
     $rows += [pscustomobject]@{{
       name          = [string]$t.TaskName
       path          = [string]$t.TaskPath
@@ -153,6 +186,9 @@ try {{
       executable    = $exe
       arguments     = $arg
       description   = $desc
+      schedule_type = $stype
+      interval_minutes = $ivmin
+      start_boundary   = $start
     }}
   }}
   if ($rows.Count -eq 0) {{
@@ -169,9 +205,8 @@ try {{
 }
 
 /// Build the `New-ScheduledTaskTrigger` expression for the requested schedule.
-fn build_trigger_expr(req: &CreateTaskRequest) -> Result<String, String> {
-    let at = req
-        .schedule
+fn build_trigger_expr(schedule: &Schedule) -> Result<String, String> {
+    let at = schedule
         .at
         .as_deref()
         .map(str::trim)
@@ -179,7 +214,7 @@ fn build_trigger_expr(req: &CreateTaskRequest) -> Result<String, String> {
         .map(parse_datetime)
         .transpose()?;
 
-    match req.schedule.ty.as_str() {
+    match schedule.ty.as_str() {
         "once" => {
             let at = at.ok_or_else(|| "一次性任务需要开始时间".to_string())?;
             Ok(format!(
@@ -195,7 +230,7 @@ fn build_trigger_expr(req: &CreateTaskRequest) -> Result<String, String> {
             ))
         }
         "interval" => {
-            let m = req.schedule.every_minutes.unwrap_or(0);
+            let m = schedule.every_minutes.unwrap_or(0);
             if m == 0 {
                 return Err("间隔(分钟)必须大于 0".to_string());
             }
@@ -224,7 +259,7 @@ pub fn build_create_script(req: &CreateTaskRequest) -> Result<String, String> {
     if program.is_empty() {
         return Err("要执行的程序不能为空".to_string());
     }
-    let trigger_cmd = build_trigger_expr(req)?;
+    let trigger_cmd = build_trigger_expr(&req.schedule)?;
 
     let mut action_args = String::from("-Execute ");
     action_args.push_str(&ps_quote(program));
@@ -287,6 +322,60 @@ pub fn build_delete_command(name: &str, path: Option<&str>) -> String {
     )
 }
 
+/// Build the PowerShell script that overwrites action/trigger/description of an
+/// existing task (GET the registered object, mutate it, pipe to Set-ScheduledTask).
+pub fn build_update_script(
+    name: &str,
+    path: Option<&str>,
+    req: &UpdateTaskRequest,
+) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("任务名称不能为空".to_string());
+    }
+    let program = req.program.trim();
+    if program.is_empty() {
+        return Err("要执行的程序不能为空".to_string());
+    }
+    let trigger_cmd = build_trigger_expr(&req.schedule)?;
+
+    let mut action_args = String::from("-Execute ");
+    action_args.push_str(&ps_quote(program));
+    if has(&req.arguments) {
+        action_args.push_str(" -Argument ");
+        action_args.push_str(&ps_quote(req.arguments.as_deref().unwrap()));
+    }
+
+    let desc_stmt = match &req.description {
+        Some(d) if !d.trim().is_empty() => {
+            format!("\n  $task.Description = {}", ps_quote(d.trim()))
+        }
+        _ => String::new(),
+    };
+
+    let path = path.filter(|p| !p.trim().is_empty()).unwrap_or("\\");
+    Ok(format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+try {{
+  $task = Get-ScheduledTask -TaskPath {path_q} -TaskName {name_q} -ErrorAction Stop
+  $task.Actions = @(New-ScheduledTaskAction {action_args})
+  $task.Triggers = @({trigger_cmd}){desc_stmt}
+  $task | Set-ScheduledTask | Out-Null
+  [Console]::Out.Write('OK|' + [string]$task.TaskPath + [string]$task.TaskName)
+}} catch {{
+  [Console]::Error.Write('UPDATE_FAIL: ' + $_.Exception.Message)
+  exit 1
+}}
+"#,
+        path_q = ps_quote(path),
+        name_q = ps_quote(name),
+        action_args = action_args,
+        trigger_cmd = trigger_cmd,
+        desc_stmt = desc_stmt,
+    ))
+}
+
 /// Run a PowerShell script and return stdout on success.
 fn run_ps(script: &str) -> Result<String, String> {
     let output = Command::new("powershell.exe")
@@ -341,6 +430,24 @@ pub fn create_task(req: &CreateTaskRequest) -> Result<String, String> {
     } else {
         Err(out
             .strip_prefix("CREATE_FAIL: ")
+            .unwrap_or(&out)
+            .trim()
+            .to_string())
+    }
+}
+
+/// Update an existing scheduled task's action/trigger/description.
+pub fn update_task(
+    name: &str,
+    path: Option<&str>,
+    req: &UpdateTaskRequest,
+) -> Result<String, String> {
+    let out = run_ps(&build_update_script(name, path, req)?)?;
+    if let Some(rest) = out.strip_prefix("OK|") {
+        Ok(rest.to_string())
+    } else {
+        Err(out
+            .strip_prefix("UPDATE_FAIL: ")
             .unwrap_or(&out)
             .trim()
             .to_string())
@@ -644,13 +751,93 @@ mod tests {
         assert!(s.contains("[Console]::Out.Write"));
     }
 
+    fn update_req(ty: &str, at: Option<&str>, every: Option<u32>) -> UpdateTaskRequest {
+        UpdateTaskRequest {
+            program: "notepad.exe".into(),
+            arguments: None,
+            description: None,
+            schedule: Schedule {
+                ty: ty.into(),
+                at: at.map(|s| s.to_string()),
+                every_minutes: every,
+            },
+        }
+    }
+
+    #[test]
+    fn update_script_shape_and_injection_guard() {
+        let mut r = update_req("once", Some("2026-09-06T12:30"), None);
+        r.arguments = Some("/c backup".into());
+        r.description = Some("改过的说明".into());
+        let s = build_update_script("Foo", None, &r).unwrap();
+        assert!(s.contains("Get-ScheduledTask -TaskPath '\\' -TaskName 'Foo'"));
+        assert!(s.contains("New-ScheduledTaskAction -Execute 'notepad.exe' -Argument '/c backup'"));
+        assert!(s.contains("$task.Triggers = @(New-ScheduledTaskTrigger -Once -At ([datetime]::ParseExact('2026-09-06T12:30'"));
+        assert!(s.contains("$task.Description = '改过的说明'"));
+        assert!(s.contains("$task | Set-ScheduledTask"));
+        // 任务名注入防护：单引号翻倍
+        let evil = build_update_script(
+            "x'; Start-Process calc; #",
+            None,
+            &update_req("once", Some("2026-09-06T12:30"), None),
+        )
+        .unwrap();
+        assert!(evil.contains("'x''; Start-Process calc; #'"));
+        assert!(!evil.contains("'x'; Start-Process"));
+    }
+
+    #[test]
+    fn update_script_validates_and_rejects_bad_schedule() {
+        let mut r = update_req("once", Some("2026-09-06T12:30"), None);
+        r.program = "  ".into();
+        assert_eq!(
+            build_update_script("Foo", None, &r).unwrap_err(),
+            "要执行的程序不能为空"
+        );
+        let e = build_update_script(
+            "Foo",
+            None,
+            &update_req("weekly", Some("2026-09-06T12:30"), None),
+        )
+        .unwrap_err();
+        assert_eq!(e, "不支持的调度类型: weekly");
+        assert_eq!(
+            build_update_script(
+                "  ",
+                None,
+                &update_req("once", Some("2026-09-06T12:30"), None)
+            )
+            .unwrap_err(),
+            "任务名称不能为空"
+        );
+        // 无说明时不带 Description 赋值
+        let s = build_update_script(
+            "Foo",
+            Some("\\My"),
+            &update_req("daily", Some("2026-09-06T12:30"), None),
+        )
+        .unwrap();
+        assert!(!s.contains("$task.Description"));
+        assert!(s.contains("Get-ScheduledTask -TaskPath '\\My' -TaskName 'Foo'"));
+    }
+
+    #[test]
+    fn update_script_braces_balanced() {
+        let s = build_update_script("Foo", None, &update_req("interval", None, Some(5))).unwrap();
+        let opens = s.chars().filter(|c| *c == '{').count();
+        let closes = s.chars().filter(|c| *c == '}').count();
+        assert_eq!(opens, closes, "花括号不成对，脚本无法解析");
+        assert!(!s.contains("{{"));
+        assert!(!s.contains("}}"));
+    }
+
     /* ---------- 真正调用 PowerShell 的集成测试 ---------- */
 
     #[test]
     #[cfg(windows)]
     fn once_trigger_expr_is_accepted_by_real_powershell() {
         let at = "2026-09-06T12:30";
-        let expr = build_trigger_expr(&req("once", Some(at), None)).unwrap();
+        let expr = build_trigger_expr(&req("once", Some(at), None).schedule).unwrap();
         // StartBoundary 是 UTC，因此把期望值也换算成 UTC 再比，避免时区耦合。
         let out = run_ps(&format!(
             "$ErrorActionPreference='Stop'\n$t = {expr}\n$expected = {lit}.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')\n[Console]::Out.Write($t.StartBoundary + '|' + $expected)",
@@ -667,7 +854,8 @@ mod tests {
     #[cfg(windows)]
     fn interval_trigger_expr_is_accepted_by_real_powershell() {
         let expr =
-            build_trigger_expr(&req("interval", Some("2026-09-06T08:00"), Some(30))).unwrap();
+            build_trigger_expr(&req("interval", Some("2026-09-06T08:00"), Some(30)).schedule)
+                .unwrap();
         let out = run_ps(&format!(
             "$ErrorActionPreference='Stop'\n$t = {expr}\n[Console]::Out.Write($t.Repetition.Interval)"
         ))

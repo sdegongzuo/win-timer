@@ -14,7 +14,7 @@
 ```bash
 cd win-timer
 cargo run          # 启动，监听 http://127.0.0.1:58081
-cargo test         # 单元测试（22 项，其中 2 项会真跑 PowerShell）
+cargo test         # 单元测试（25 项，其中 2 项会真跑 PowerShell）
 cargo test -- --ignored   # 额外跑需要访问计划任务服务/事件日志的集成测试
 cargo clippy --all-targets
 cargo fmt
@@ -45,6 +45,7 @@ python e2e_smoke.py
 | POST | `/api/tasks` | 创建任务 |
 | DELETE | `/api/tasks/{name}?path=\` | 删除任务 |
 | POST | `/api/tasks/{verb}/{name}?path=\` | `verb` ∈ `run`\|`end`\|`enable`\|`disable` |
+| PUT | `/api/tasks/{name}?path=\` | 编辑任务（程序/参数/说明/调度整体覆盖），请求体同创建但无 `name` |
 | GET | `/api/history?task=名称` | 执行历史，`task` 可选（按任务名精确过滤）。返回 `{history_enabled, rows}`；数据源是事件日志 `Microsoft-Windows-TaskScheduler/Operational`（事件 100/101/201 按 `TaskExecutionId` 关联成一次运行）。历史记录未启用时 `history_enabled=false` 且 `rows` 为空，**不是错误**——前端据此显示开启指引 |
 
 错误统一返回 `{"error": "中文说明"}`（HTTP 500），前端直接展示 `error` 字段。

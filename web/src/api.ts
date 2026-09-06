@@ -54,6 +54,15 @@ export async function createTask(input: CreateTaskInput): Promise<CreateResponse
   return request<CreateResponse>('/api/tasks', json('POST', input))
 }
 
+export async function updateTask(
+  name: string,
+  path: string,
+  input: CreateTaskInput,
+): Promise<void> {
+  const qs = path && path !== '\\' ? `?path=${encodeURIComponent(path)}` : ''
+  await request<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(name)}${qs}`, json('PUT', input))
+}
+
 export async function runVerb(
   verb: 'run' | 'end' | 'enable' | 'disable',
   name: string,

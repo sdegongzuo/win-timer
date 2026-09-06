@@ -89,6 +89,25 @@ def main():
         # 5) 运行
         st, body = call("POST", f"/tasks/run/{NAME}")
         check("运行任务", st == 200, f"HTTP {st} {body}")
+
+        # 5.5) 编辑：改程序/参数/说明/调度，验证后端 PUT 生效
+        at2 = (datetime.now() + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M")
+        st, body = call("PUT", f"/tasks/{NAME}", {
+            "program": r"C:\Windows\System32\cmd.exe",
+            "arguments": "/c exit 7",
+            "description": "被编辑过的说明",
+            "schedule": {"ty": "daily", "at": at2, "every_minutes": None},
+        })
+        check("编辑任务", st == 200, f"HTTP {st} {body}")
+        _, body = call("GET", "/tasks?scope=root")
+        t = find(body.get("tasks", []))
+        check("编辑后参数已更新",
+              t and t["arguments"] == "/c exit 7" and t["schedule_type"] == "daily",
+              f"arguments={t['arguments'] if t else '?'} schedule_type={t['schedule_type'] if t else '?'}")
+        check("编辑后说明已更新",
+              t and t["description"] == "被编辑过的说明",
+              t["description"] if t else "")
+        check("编辑后 start_boundary 存在", t and t["start_boundary"], t["start_boundary"] if t else "")
     finally:
         # 6) 删除（无论上面成败都必须清理）
         st, body = call("DELETE", f"/tasks/{NAME}")

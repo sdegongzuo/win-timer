@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,15 @@ async fn delete_task(
     Ok(Json(json!({ "ok": true })))
 }
 
+async fn update_task(
+    Path(name): Path<String>,
+    q: Query<TaskPathQuery>,
+    Json(req): Json<tasks::UpdateTaskRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tasks::update_task(&name, q.path.as_deref(), &req).map_err(ApiError::from)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 #[derive(Deserialize)]
 struct HistoryQuery {
     /// 可选：按任务名精确过滤
@@ -128,7 +137,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/tasks", get(list_tasks).post(create_task))
-        .route("/api/tasks/{name}", delete(delete_task))
+        .route("/api/tasks/{name}", put(update_task).delete(delete_task))
         .route("/api/tasks/{verb}/{name}", post(task_verb))
         .route("/api/history", get(get_history))
         .layer(cors);

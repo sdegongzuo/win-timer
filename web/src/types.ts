@@ -1,3 +1,5 @@
+export type ScheduleType = 'once' | 'interval' | 'daily' | 'unknown'
+
 export interface TaskSummary {
   name: string
   path: string
@@ -9,6 +11,9 @@ export interface TaskSummary {
   executable: string | null
   arguments: string | null
   description: string | null
+  schedule_type: ScheduleType | null
+  interval_minutes: number | null
+  start_boundary: string | null
 }
 
 export interface Schedule {

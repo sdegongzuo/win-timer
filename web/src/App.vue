@@ -7,6 +7,7 @@ import {
   fetchHistory,
   listTasks,
   runVerb,
+  updateTask,
 } from './api'
 import { BACKEND_PORT } from './config'
 import type { HistoryResponse, RunRecord, TaskSummary } from './types'
@@ -77,8 +78,10 @@ async function onDelete(t: TaskSummary) {
   }
 }
 
-/* ---------------- create form ---------------- */
+/* ---------------- create / edit modal ---------------- */
 const showCreate = ref(false)
+/** 非空表示当前弹窗处于"编辑已有任务"模式 */
+const editingTask = ref<TaskSummary | null>(null)
 const form = reactive({
   name: '',
   program: '',
@@ -108,6 +111,22 @@ function openCreate() {
     every_minutes: 5,
     busy: false,
   })
+  editingTask.value = null
+  showCreate.value = true
+}
+
+function openEdit(t: TaskSummary) {
+  editingTask.value = t
+  Object.assign(form, {
+    name: t.name,
+    program: t.executable ?? '',
+    arguments: t.arguments ?? '',
+    description: t.description!.trim(),
+    ty: (t.schedule_type ?? 'once') as 'once' | 'interval' | 'daily',
+    at: (t.start_boundary ?? '').slice(0, 16),
+    every_minutes: t.interval_minutes ?? 5,
+    busy: false,
+  })
   showCreate.value = true
 }
 
@@ -120,7 +139,7 @@ async function submitCreate() {
     if (needsAt && !form.at) {
       throw new Error('请选择开始时间')
     }
-    await createTask({
+    const payload = {
       name: form.name.trim(),
       program: form.program.trim(),
       arguments: form.arguments.trim() || null,
@@ -130,8 +149,14 @@ async function submitCreate() {
         at: form.at || null,
         every_minutes: form.ty === 'interval' ? form.every_minutes : null,
       },
-    })
+    }
+    if (editingTask.value) {
+      await updateTask(editingTask.value.name, editingTask.value.path, payload)
+    } else {
+      await createTask(payload)
+    }
     showCreate.value = false
+    editingTask.value = null
     await refresh()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -310,6 +335,7 @@ onUnmounted(() => {
                 <button v-else class="mini accent" @click="act('enable', t)">
                   {{ runningVerb('enable', t) ? '…' : '启用' }}
                 </button>
+                <button class="mini" @click="openEdit(t)">编辑</button>
                 <button class="mini" @click="openHistory(t)">历史</button>
                 <button class="mini danger" :disabled="deletingVerb(t)" @click="onDelete(t)">
                   {{ deletingVerb(t) ? '…' : '删除' }}
@@ -324,11 +350,11 @@ onUnmounted(() => {
     <!-- create modal -->
     <div v-if="showCreate" class="overlay" @click.self="showCreate = false">
       <div class="modal">
-        <h2>新建计划任务</h2>
+        <h2>{{ editingTask ? '编辑计划任务' : '新建计划任务' }}</h2>
         <form @submit.prevent="submitCreate">
           <label>
             任务名称
-            <input v-model="form.name" required placeholder="例如: 备份数据" />
+            <input v-model="form.name" required :disabled="!!editingTask" placeholder="例如: 备份数据" />
           </label>
           <label>
             要执行的程序
@@ -384,7 +410,7 @@ onUnmounted(() => {
           <div class="modal-actions">
             <button type="button" class="btn ghost" @click="showCreate = false">取消</button>
             <button type="submit" class="btn primary" :disabled="form.busy">
-              {{ form.busy ? '创建中…' : '创建' }}
+              {{ form.busy ? '保存中…' : editingTask ? '保存修改' : '创建' }}
             </button>
           </div>
         </form>
