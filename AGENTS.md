@@ -41,12 +41,12 @@ python e2e_smoke.py
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查 |
-| GET | `/api/tasks?scope=root\|all` | 列出任务，`root` 只含根目录 `\`。结果带 30 秒 TTL 缓存（`src/main.rs` 的 `LIST_CACHE_TTL`），创建/删除/启停/编辑会立即失效缓存；PowerShell 枚举在 `spawn_blocking` 中执行 |
+| GET | `/api/tasks?scope=root\|all` | 列出任务，`root` 只含根目录 `\`。结果带 30 秒 TTL 缓存（`src/main.rs` 的 `CACHE_TTL`），创建/删除/启停/编辑会立即失效缓存；PowerShell 枚举在 `spawn_blocking` 中执行 |
 | POST | `/api/tasks` | 创建任务 |
 | DELETE | `/api/tasks/{name}?path=\` | 删除任务 |
 | POST | `/api/tasks/{verb}/{name}?path=\` | `verb` ∈ `run`\|`end`\|`enable`\|`disable` |
 | PUT | `/api/tasks/{name}?path=\` | 编辑任务（程序/参数/说明/调度整体覆盖），请求体同创建但无 `name` |
-| GET | `/api/history?task=名称` | 执行历史，`task` 可选（按任务名精确过滤）。返回 `{history_enabled, rows}`；数据源是事件日志 `Microsoft-Windows-TaskScheduler/Operational`（事件 100/101/201 按 `TaskExecutionId` 关联成一次运行）。历史记录未启用时 `history_enabled=false` 且 `rows` 为空，**不是错误**——前端据此显示开启指引 |
+| GET | `/api/history?task=名称` | 执行历史，`task` 可选（按任务名精确过滤）。返回 `{history_enabled, rows}`；数据源是事件日志 `Microsoft-Windows-TaskScheduler/Operational`（事件 100/101/201 按 `TaskExecutionId` 关联成一次运行）。按 task 过滤参数做 30 秒 TTL 缓存（空串 = 全部）。历史记录未启用时 `history_enabled=false` 且 `rows` 为空，**不是错误**——前端据此显示开启指引 |
 
 错误统一返回 `{"error": "中文说明"}`（HTTP 500），前端直接展示 `error` 字段。
 
@@ -76,6 +76,9 @@ python e2e_smoke.py
 
 ## 已知环境注意事项
 
+- `run_ps` 有 60 秒超时（`tasks.rs` 的 `PS_TIMEOUT`）：stdout/stderr 必须由独立线程并发读取——
+  先 wait 再读管道，输出超过管道缓冲区时子进程会因写阻塞永远无法退出（典型管道死锁）；
+  超时后 kill 进程并返回中文错误。
 - 后端调用的是 `powershell.exe`（Windows PowerShell 5.1），不是 `pwsh`。5.1 自带 `ScheduledTasks` 模块，兼容性最好。
 - 时间格式：`datetime-local` 输入框产出 `yyyy-MM-ddTHH:mm`，后端用 `ParseExact` + `InvariantCulture` 解析，不接受其他格式。
 - `cargo` 使用 `D:\app\cargo\config.toml` 里配置的 `rsproxy-sparse` 镜像。

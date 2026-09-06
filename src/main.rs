@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -51,20 +52,29 @@ async fn health() -> Json<Health> {
     })
 }
 
-/// 列表缓存的有效期。枚举全部计划任务要 spawn PowerShell 逐个取信息，
-/// 实测 scope=all 约 6.7 秒；TTL 内直接复用上次结果，避免前端轮询把 CPU 打满。
-const LIST_CACHE_TTL: Duration = Duration::from_secs(30);
+/// 缓存的有效期（列表与执行历史共用）。
+/// 枚举全部计划任务要 spawn PowerShell 逐个取信息，实测 scope=all 约 6.7 秒；
+/// 历史接口即使"历史记录未启用"也要约 2.6 秒。TTL 内直接复用上次结果，
+/// 避免前端轮询把 CPU 打满。
+const CACHE_TTL: Duration = Duration::from_secs(30);
 
 struct CachedList {
     fetched_at: Instant,
     tasks: Arc<Vec<tasks::TaskSummary>>,
 }
 
-/// 共享状态：root / all 两种 scope 各自缓存一份列表。
+struct CachedHistory {
+    fetched_at: Instant,
+    payload: Arc<tasks::HistoryPayload>,
+}
+
+/// 共享状态：列表按 root / all 两种 scope 各缓存一份；
+/// 执行历史按 task 过滤参数缓存（空串 = 全部）。
 #[derive(Default)]
 struct AppState {
     cache_root: Mutex<Option<CachedList>>,
     cache_all: Mutex<Option<CachedList>>,
+    cache_history: Mutex<HashMap<String, CachedHistory>>,
     /// 缓存代数：每次 invalidate 自增。PowerShell 枚举要数秒，期间若发生写操作，
     /// 完成后的旧列表不得写回缓存——否则新任务最长 30 秒不可见。
     generation: AtomicU64,
@@ -98,7 +108,7 @@ async fn list_tasks(
     let hit = {
         let guard = state.cache(all).lock().unwrap();
         match guard.as_ref() {
-            Some(c) if c.fetched_at.elapsed() < LIST_CACHE_TTL => Some(Arc::clone(&c.tasks)),
+            Some(c) if c.fetched_at.elapsed() < CACHE_TTL => Some(Arc::clone(&c.tasks)),
             _ => None,
         }
     };
@@ -133,7 +143,13 @@ async fn create_task(
     State(state): State<Arc<AppState>>,
     Json(req): Json<tasks::CreateTaskRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let located = tasks::create_task(&req).map_err(ApiError::from)?;
+    // PowerShell 调用是秒级同步阻塞，统一丢进阻塞线程池，避免占死 tokio 工作线程。
+    let located = tokio::task::spawn_blocking(move || tasks::create_task(&req))
+        .await
+        .map_err(|e| ApiError {
+            error: format!("后台执行创建任务失败: {e}"),
+        })?
+        .map_err(ApiError::from)?;
     state.invalidate();
     let (path, name) = split_located(&located);
     Ok(Json(json!({ "ok": true, "name": name, "path": path })))
@@ -163,7 +179,12 @@ async fn task_verb(
     Path((verb, name)): Path<(String, String)>,
     q: Query<TaskPathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    tasks::task_verb(&verb, &name, q.path.as_deref()).map_err(ApiError::from)?;
+    tokio::task::spawn_blocking(move || tasks::task_verb(&verb, &name, q.path.as_deref()))
+        .await
+        .map_err(|e| ApiError {
+            error: format!("后台执行任务操作失败: {e}"),
+        })?
+        .map_err(ApiError::from)?;
     state.invalidate();
     Ok(Json(json!({ "ok": true })))
 }
@@ -173,7 +194,12 @@ async fn delete_task(
     Path(name): Path<String>,
     q: Query<TaskPathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    tasks::delete_task(&name, q.path.as_deref()).map_err(ApiError::from)?;
+    tokio::task::spawn_blocking(move || tasks::delete_task(&name, q.path.as_deref()))
+        .await
+        .map_err(|e| ApiError {
+            error: format!("后台执行删除任务失败: {e}"),
+        })?
+        .map_err(ApiError::from)?;
     state.invalidate();
     Ok(Json(json!({ "ok": true })))
 }
@@ -184,7 +210,12 @@ async fn update_task(
     q: Query<TaskPathQuery>,
     Json(req): Json<tasks::UpdateTaskRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    tasks::update_task(&name, q.path.as_deref(), &req).map_err(ApiError::from)?;
+    tokio::task::spawn_blocking(move || tasks::update_task(&name, q.path.as_deref(), &req))
+        .await
+        .map_err(|e| ApiError {
+            error: format!("后台执行编辑任务失败: {e}"),
+        })?
+        .map_err(ApiError::from)?;
     state.invalidate();
     Ok(Json(json!({ "ok": true })))
 }
@@ -195,11 +226,50 @@ struct HistoryQuery {
     task: Option<String>,
 }
 
-async fn get_history(q: Query<HistoryQuery>) -> Result<Json<serde_json::Value>, ApiError> {
-    let payload = tasks::task_history(q.task.as_deref())?;
+async fn get_history(
+    State(state): State<Arc<AppState>>,
+    q: Query<HistoryQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // 缓存键：任务名（空串 = 全部任务）。读事件日志即使历史未启用也要约 2.6 秒。
+    let key = q.task.clone().unwrap_or_default();
+    let hit = {
+        let guard = state.cache_history.lock().unwrap();
+        match guard.get(&key) {
+            Some(c) if c.fetched_at.elapsed() < CACHE_TTL => Some(Arc::clone(&c.payload)),
+            _ => None,
+        }
+    };
+    if let Some(p) = hit {
+        return Ok(Json(json!({
+            "history_enabled": p.history_enabled,
+            "rows": p.rows.as_slice(),
+        })));
+    }
+
+    let payload = tokio::task::spawn_blocking(move || tasks::task_history(q.task.as_deref()))
+        .await
+        .map_err(|e| ApiError {
+            error: format!("后台读取执行历史失败: {e}"),
+        })?
+        .map_err(ApiError::from)?;
+    let payload = Arc::new(payload);
+
+    // 写入缓存前清掉同键的过期项，防止 map 无限增长。
+    {
+        let mut guard = state.cache_history.lock().unwrap();
+        guard.retain(|_, c| c.fetched_at.elapsed() < CACHE_TTL);
+        guard.insert(
+            key,
+            CachedHistory {
+                fetched_at: Instant::now(),
+                payload: Arc::clone(&payload),
+            },
+        );
+    }
+
     Ok(Json(json!({
         "history_enabled": payload.history_enabled,
-        "rows": payload.rows,
+        "rows": payload.rows.as_slice(),
     })))
 }
 

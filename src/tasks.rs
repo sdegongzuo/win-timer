@@ -7,7 +7,10 @@
 //! 这样无需真实的计划任务服务即可单元测试（见文件末尾 `mod tests`）。
 
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TaskSummary {
@@ -42,7 +45,7 @@ pub struct RunRecord {
     pub status: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct HistoryPayload {
     /// 任务计划程序的"历史记录"开关是否已启用
     pub history_enabled: bool,
@@ -134,7 +137,8 @@ pub fn build_list_script(scope_all: bool) -> String {
         r#"
 $ErrorActionPreference = 'Stop'
 try {{
-  $rows = @()
+  # 用 List 而不是 $rows +=：PS 5.1 里 += 每次复制整个数组，任务多时是 O(n²)
+  $rows = New-Object System.Collections.Generic.List[object]
   $all = @(Get-ScheduledTask{folder_filter})
   foreach ($t in $all) {{
     $info = $t | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
@@ -182,7 +186,7 @@ try {{
         $stype = 'once'
       }}
     }}
-    $rows += [pscustomobject]@{{
+    $rows.Add([pscustomobject]@{{
       name          = [string]$t.TaskName
       path          = [string]$t.TaskPath
       state         = [string]$t.State
@@ -196,11 +200,13 @@ try {{
       schedule_type = $stype
       interval_minutes = $ivmin
       start_boundary   = $start
-    }}
+    }})
   }}
   if ($rows.Count -eq 0) {{
     [Console]::Out.Write('[]')
   }} else {{
+    # 直接传 List 本身：5.1 的 ConvertTo-Json 对 @($rows) 会抛
+    # "Argument types do not match"，且 -InputObject 直接收 List 时数组语义完好
     [Console]::Out.Write((ConvertTo-Json -InputObject $rows -Depth 3 -Compress))
   }}
 }} catch {{
@@ -383,9 +389,16 @@ try {{
     ))
 }
 
+/// PowerShell 单次执行上限。事件日志服务挂起、任务计划 RPC 阻塞等情况下
+/// PowerShell 可能永久卡死，果断终止并报错，不让调用线程无限等待。
+const PS_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Run a PowerShell script and return stdout on success.
+///
+/// stdout/stderr 由独立线程并发读取：若在 wait 之后再读管道，输出超过
+/// 管道缓冲区时子进程会因写阻塞而永远无法退出（典型管道死锁）。
 fn run_ps(script: &str) -> Result<String, String> {
-    let output = Command::new("powershell.exe")
+    let mut child = Command::new("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -394,13 +407,57 @@ fn run_ps(script: &str) -> Result<String, String> {
             "-Command",
             script,
         ])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("无法启动 PowerShell: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    // 取出管道后立刻交给读取线程，主线程只负责等待/超时。
+    let mut stdout_pipe = child.stdout.take().expect("stdout 必须已接管");
+    let mut stderr_pipe = child.stderr.take().expect("stderr 必须已接管");
+    let stdout_reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
 
-    if output.status.success() {
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if start.elapsed() >= PS_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // kill 后管道关闭，读取线程会自然结束，join 不会卡住。
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(format!(
+                        "PowerShell 执行超时（超过 {} 秒），已强制终止",
+                        PS_TIMEOUT.as_secs()
+                    ));
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("等待 PowerShell 失败: {e}")),
+        }
+    };
+
+    let stdout_raw = stdout_reader
+        .join()
+        .map_err(|_| "读取 PowerShell stdout 失败".to_string())?;
+    let stderr_raw = stderr_reader
+        .join()
+        .map_err(|_| "读取 PowerShell stderr 失败".to_string())?;
+    let stdout = String::from_utf8_lossy(&stdout_raw).trim().to_string();
+    let stderr = String::from_utf8_lossy(&stderr_raw).trim().to_string();
+
+    if status.success() {
         Ok(stdout)
     } else {
         let mut msg = stderr;
@@ -408,7 +465,7 @@ fn run_ps(script: &str) -> Result<String, String> {
             msg = stdout;
         }
         if msg.is_empty() {
-            msg = format!("PowerShell 退出码 {}", output.status.code().unwrap_or(-1));
+            msg = format!("PowerShell 退出码 {}", status.code().unwrap_or(-1));
         }
         Err(msg)
     }
@@ -529,17 +586,18 @@ foreach ($e in $events) {{
     $r.status = 'start_failed'
   }}
 }}
-$rows = @()
+# 用 List 而不是 $rows +=：PS 5.1 里 += 每次复制整个数组，运行记录多时是 O(n²)
+$rows = New-Object System.Collections.Generic.List[object]
 foreach ($k in $runs.Keys) {{
   $r = $runs[$k]
   if ($null -eq $r.start -and $null -eq $r.end) {{ continue }}
-  $rows += [pscustomobject]@{{
+  $rows.Add([pscustomobject]@{{
     task_name   = [string]$r.task
     start_time  = $r.start
     end_time    = $r.end
     result_code = $r.result
     status      = [string]$r.status
-  }}
+  }})
 }}
 $rows = @($rows | Sort-Object {{ if ($_.start_time) {{ $_.start_time }} else {{ $_.end_time }} }} -Descending | Select-Object -First 200)
 $out = [pscustomobject]@{{ history_enabled = $histEnabled; rows = $rows }}
@@ -620,9 +678,13 @@ mod tests {
     #[test]
     fn list_script_uses_inputobject_so_single_task_is_an_array() {
         // 回归测试：走管道时单元素会被降级成对象，导致反序列化失败。
+        // $rows 现在是 List[object]，实测 5.1 的 ConvertTo-Json -InputObject 直接收
+        // List 时数组语义完好（单元素也是 [...]）；但包一层 @() 会抛
+        // "Argument types do not match"，所以不能写 @($rows)。
         let s = build_list_script(false);
         assert!(s.contains("ConvertTo-Json -InputObject $rows"));
         assert!(!s.contains("$rows | ConvertTo-Json"));
+        assert!(!s.contains("-InputObject @($rows)"));
         assert!(s.contains("-TaskPath '\\'"));
         // scope=all 时不带 TaskPath 过滤
         let a = build_list_script(true);
