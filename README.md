@@ -7,7 +7,7 @@
 ## 快速开始
 
 ```bash
-# 终端 1 - 后端（监听 http://127.0.0.1:8080）
+# 终端 1 - 后端（监听 http://127.0.0.1:58081）
 cd win-timer
 cargo run
 
@@ -17,8 +17,9 @@ pnpm install
 pnpm dev
 ```
 
-打开 http://localhost:5173 。
+打开 http://localhost:58173 。
 
+> 端口刻意选在 49152–65535 动态段（后端 58081 / 前端 58173），避开 8080、5173、3000 等常见开发端口。
 > 读取任务一般不需要管理员权限；在根目录 `\` 下**新建/删除**任务建议用管理员终端启动后端。
 
 ## 功能
@@ -52,7 +53,9 @@ python e2e_smoke.py         # 端到端冒烟（后端需先启动；会临时�
 
 ## 常见问题
 
-**页面提示"后端未连接"** —— 后端没起。`cd win-timer && cargo run`，确认 8080 端口未被占用。
+**页面提示"后端未连接"** —— 后端没起。`cd win-timer && cargo run`，确认 58081 端口未被占用。
+
+**端口还是冲突了** —— 需同步改三处：`src/main.rs` 的 bind 地址、`web/vite.config.ts` 的 proxy target、`web/src/config.ts` 的 `BACKEND_PORT`。前端端口只改 `web/vite.config.ts` 的 `server.port`（并同步 `web/src/config.ts` 的 `FRONTEND_PORT`，仅用于展示）。
 
 **创建任务失败并提示"拒绝访问"** —— 用管理员终端重新启动后端。
 

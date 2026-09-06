@@ -118,10 +118,12 @@ async fn main() {
         .route("/api/tasks/{verb}/{name}", post(task_verb))
         .layer(cors);
 
-    let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    // 端口刻意选在 49152-65535 动态段，避开 8080/3000/5173 等常见开发端口。
+    // 改动此端口时，同步改 web/vite.config.ts 的 proxy target 与 web/src/config.ts。
+    let addr: SocketAddr = "127.0.0.1:58081".parse().unwrap();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .expect("绑定 127.0.0.1:8080 失败，请确认端口未被占用");
+        .expect("绑定 127.0.0.1:58081 失败，请确认端口未被占用");
     tracing::info!("win-timer backend listening on http://{addr}");
     axum::serve(listener, app).await.unwrap();
 }

@@ -7,6 +7,7 @@ import {
   listTasks,
   runVerb,
 } from './api'
+import { BACKEND_PORT } from './config'
 import type { TaskSummary } from './types'
 
 const tasks = ref<TaskSummary[]>([])
@@ -174,7 +175,7 @@ onUnmounted(() => {
           :class="backendOk === null ? 'dot-unknown' : backendOk ? 'dot-ok' : 'dot-bad'"
         ></span>
         <span v-if="backendOk === null">检测后端…</span>
-        <span v-else-if="backendOk">后端已连接 (127.0.0.1:8080)</span>
+        <span v-else-if="backendOk">后端已连接 (127.0.0.1:{{ BACKEND_PORT }})</span>
         <span v-else>后端未连接</span>
       </div>
     </header>

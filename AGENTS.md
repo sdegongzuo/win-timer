@@ -2,8 +2,10 @@
 
 本仓库是 **win-timer**：一个管理本机 Windows 计划任务的最小全栈应用。
 
-- 后端：Rust + axum，监听 `127.0.0.1:8080`，通过 PowerShell 的 `ScheduledTasks` 模块操作本机计划任务。
-- 前端：Vue 3 + Vite，位于 `web/`，dev server 在 `5173`，把 `/api` 代理到后端。
+- 后端：Rust + axum，监听 `127.0.0.1:58081`，通过 PowerShell 的 `ScheduledTasks` 模块操作本机计划任务。
+- 前端：Vue 3 + Vite，位于 `web/`，dev server 在 `58173`，把 `/api` 代理到后端。
+
+端口刻意选在 49152–65535 动态段，避开 8080 / 5173 / 3000 等常见开发端口。
 
 ## 常用命令
 
@@ -11,7 +13,7 @@
 
 ```bash
 cd win-timer
-cargo run          # 启动，监听 http://127.0.0.1:8080
+cargo run          # 启动，监听 http://127.0.0.1:58081
 cargo test         # 单元测试（18 项，其中 2 项会真跑 PowerShell）
 cargo test -- --ignored   # 额外跑需要访问计划任务服务的集成测试
 cargo clippy --all-targets
@@ -23,14 +25,14 @@ cargo fmt
 ```bash
 cd win-timer/web
 pnpm install
-pnpm dev           # http://localhost:5173
+pnpm dev           # http://localhost:58173
 pnpm build         # vue-tsc -b && vite build
 ```
 
 端到端冒烟（**会真实创建并删除一个名为 `win-timer-selftest` 的计划任务**）：
 
 ```bash
-# 先确保后端已在 8080 运行
+# 先确保后端已在 58081 运行
 python e2e_smoke.py
 ```
 
@@ -50,18 +52,25 @@ python e2e_smoke.py
 
 1. **后端必须能访问本机计划任务服务。** 读取通常不需要提权；创建/删除根目录 `\` 的任务在非提权会话下可能失败。失败时后端会把 PowerShell 的错误原文转成中文提示返回给前端，不要吞掉。
 
-2. **前端只通过相对路径 `/api` 访问后端**，不要写死 `127.0.0.1:8080`。代理配置在 `web/vite.config.ts`。
+2. **前端只通过相对路径 `/api` 访问后端**，不要写死 `127.0.0.1:58081`。代理配置在 `web/vite.config.ts`。
 
-3. **所有 PowerShell 脚本的构造都放在 `src/tasks.rs` 的 `build_*` 纯函数里**，不要内联在业务函数里——这些函数是可单元测试的边界。
+3. **改端口必须同步三处**：`src/main.rs` 的 bind 地址、`web/vite.config.ts` 的 proxy target、
+   `web/src/config.ts` 的 `BACKEND_PORT`（后者只用于界面展示与错误提示）。前端端口在
+   `web/vite.config.ts` 的 `server.port`，并开了 `strictPort`——被占用时直接报错而不是静默换端口。
 
-4. **PowerShell 语法陷阱（已踩过，勿回退）**：
+4. **所有 PowerShell 脚本的构造都放在 `src/tasks.rs` 的 `build_*` 纯函数里**，不要内联在业务函数里——这些函数是可单元测试的边界。
+
+5. **PowerShell 语法陷阱（已踩过，勿回退）**：
    - `ConvertTo-Json` 必须用 `-InputObject $rows`，不能用管道。走管道时若只有 1 个元素，输出会是 `{...}` 而不是 `[{...}]`，反序列化成 `Vec<TaskSummary>` 直接失败。
    - 传给 cmdlet 的表达式必须加括号：`-At ([datetime]::ParseExact(...))`。不括号时 PowerShell 在参数模式下会把整个表达式当字符串字面量。
    - 输出用 `[Console]::Out.Write(...)`、错误用 `[Console]::Error.Write(...)`，不要用 `Write-Output` / `Write-Error`。后者会经过格式化层（长 JSON 可能被按控制台宽度折行破坏），且 `Write-Error` 会把整段脚本拼进错误消息。
 
-5. **所有用户输入必须经 `ps_quote()` 转义**后再拼进 PowerShell 脚本（单引号翻倍），否则任务名可以注入任意命令。
+6. **所有用户输入必须经 `ps_quote()` 转义**后再拼进 PowerShell 脚本（单引号翻倍），否则任务名可以注入任意命令。
 
-6. **UI 与 CLI 文案一律简体中文**，代码注释也用中文。
+7. **UI 与 CLI 文案一律简体中文**，代码注释也用中文。
+
+8. **UI 是亮色主题**，配色集中在 `web/src/style.css` 的 `:root` 变量里，并在 `:root` 上声明了
+   `color-scheme: light`。改配色只动变量，不要在组件里写死颜色。
 
 ## 已知环境注意事项
 

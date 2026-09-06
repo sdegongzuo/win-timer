@@ -7,7 +7,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timedelta
 
-BASE = "http://127.0.0.1:8080/api"
+BASE = "http://127.0.0.1:58081/api"
 NAME = "win-timer-selftest"
 results = []
 

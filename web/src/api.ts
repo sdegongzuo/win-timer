@@ -1,3 +1,4 @@
+import { BACKEND_PORT } from './config'
 import type {
   CreateResponse,
   CreateTaskInput,
@@ -11,7 +12,9 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   try {
     res = await fetch(url, init)
   } catch {
-    throw new Error('无法连接后端服务(win-timer axum)。请确认它在 8080 端口运行。')
+    throw new Error(
+      `无法连接后端服务(win-timer axum)。请确认它在 ${BACKEND_PORT} 端口运行。`,
+    )
   }
   if (!res.ok) {
     let message = `请求失败 (HTTP ${res.status})`
