@@ -23,7 +23,27 @@ pub struct TaskSummary {
     pub description: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+/// 单次执行记录（来自任务计划程序事件日志，按 TaskExecutionId 关联）。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RunRecord {
+    pub task_name: String,
+    /// 事件 100（任务启动）的时间
+    pub start_time: Option<String>,
+    /// 事件 201/101（动作完成/启动失败）的时间
+    pub end_time: Option<String>,
+    pub result_code: Option<i64>,
+    /// "running" | "done" | "failed" | "start_failed" | "unknown"
+    pub status: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct HistoryPayload {
+    /// 任务计划程序的"历史记录"开关是否已启用
+    pub history_enabled: bool,
+    pub rows: Vec<RunRecord>,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct Schedule {
     /// "once" | "interval" | "daily"
     pub ty: String,
@@ -337,6 +357,98 @@ pub fn delete_task(name: &str, path: Option<&str>) -> Result<(), String> {
     run_ps(&build_delete_command(name, path)).map(|_| ())
 }
 
+/// Build the PowerShell script that reads recent task runs from the
+/// Task Scheduler operational event log.
+///
+/// 数据源是事件日志 `Microsoft-Windows-TaskScheduler/Operational`：
+/// - 事件 100：任务启动（拿到开始时间）
+/// - 事件 201：动作完成（拿到结束时间与 ResultCode）
+/// - 事件 101：任务启动失败
+///
+/// 事件按 `TaskName + TaskExecutionId` 关联成一次运行。历史记录开关未启用时
+/// 日志为空/不存在，此时返回 `history_enabled = false` 与空列表而不是报错。
+///
+/// `task` 可选：按任务名精确过滤（用户输入，必须经 `ps_quote` 转义）。
+pub fn build_history_script(task: Option<&str>) -> String {
+    let filter = match task {
+        Some(t) if !t.trim().is_empty() => ps_quote(t.trim()),
+        _ => "''".to_string(),
+    };
+    format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+$histEnabled = $false
+try {{ $histEnabled = [bool](Get-LogProperties 'Microsoft-Windows-TaskScheduler/Operational').Enabled }} catch {{ $histEnabled = $false }}
+$taskFilter = {filter}
+$events = @()
+try {{
+  $events = @(Get-WinEvent -FilterHashtable @{{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; Id = 100,101,201 }} -MaxEvents 3000 -ErrorAction Stop)
+}} catch {{ $events = @() }}
+$runs = @{{}}
+foreach ($e in $events) {{
+  $x = [xml]$e.ToXml()
+  $data = @{{}}
+  foreach ($d in @($x.Event.EventData.Data)) {{
+    if ($null -ne $d -and $d.Name) {{ $data[[string]$d.Name] = [string]$d.'#text' }}
+  }}
+  $tn = [string]$data['TaskName']
+  if ($taskFilter -ne '' -and $tn -ne $taskFilter) {{ continue }}
+  $key = $tn + '|' + [string]$data['TaskExecutionId']
+  if (-not $runs.ContainsKey($key)) {{
+    $runs[$key] = @{{ task = $tn; start = $null; end = $null; result = $null; status = 'unknown' }}
+  }}
+  $r = $runs[$key]
+  $tstr = $e.TimeCreated.ToString('yyyy-MM-ddTHH:mm:ss')
+  $rc = $null
+  try {{ $rc = [long]$data['ResultCode'] }} catch {{}}
+  if ($e.Id -eq 100) {{
+    $r.start = $tstr
+    if ($r.status -eq 'unknown') {{ $r.status = 'running' }}
+  }} elseif ($e.Id -eq 201) {{
+    $r.end = $tstr
+    $r.result = $rc
+    $r.status = 'done'
+    if ($null -ne $rc -and $rc -ne 0) {{ $r.status = 'failed' }}
+  }} else {{
+    $r.end = $tstr
+    $r.result = $rc
+    $r.status = 'start_failed'
+  }}
+}}
+$rows = @()
+foreach ($k in $runs.Keys) {{
+  $r = $runs[$k]
+  if ($null -eq $r.start -and $null -eq $r.end) {{ continue }}
+  $rows += [pscustomobject]@{{
+    task_name   = [string]$r.task
+    start_time  = $r.start
+    end_time    = $r.end
+    result_code = $r.result
+    status      = [string]$r.status
+  }}
+}}
+$rows = @($rows | Sort-Object {{ if ($_.start_time) {{ $_.start_time }} else {{ $_.end_time }} }} -Descending | Select-Object -First 200)
+$out = [pscustomobject]@{{ history_enabled = $histEnabled; rows = $rows }}
+[Console]::Out.Write((ConvertTo-Json -InputObject $out -Depth 4 -Compress))
+"#,
+        filter = filter,
+    )
+}
+
+/// Read recent execution history, optionally filtered by exact task name.
+pub fn task_history(task: Option<&str>) -> Result<HistoryPayload, String> {
+    let out = run_ps(&build_history_script(task))?;
+    if out.is_empty() {
+        return Err("PowerShell 未返回任何输出".to_string());
+    }
+    serde_json::from_str(&out).map_err(|e| {
+        format!(
+            "解析执行历史失败: {e}（原始输出前 200 字符: {}）",
+            &out[..out.len().min(200)]
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,6 +619,31 @@ mod tests {
         assert!(!s.contains("}}"));
     }
 
+    #[test]
+    fn history_script_quotes_task_filter() {
+        let s = build_history_script(Some("Foo"));
+        assert!(s.contains("$taskFilter = 'Foo'"));
+        // 注入防护：任务名里的单引号必须翻倍，防止提前闭合字符串字面量
+        let evil = build_history_script(Some("x'; Start-Process calc; #"));
+        assert!(evil.contains("'x''; Start-Process calc; #'"));
+        assert!(!evil.contains("'x'; Start-Process"));
+    }
+
+    #[test]
+    fn history_script_without_filter_and_syntax_shape() {
+        let s = build_history_script(None);
+        assert!(s.contains("$taskFilter = ''"));
+        // 花括号必须成对（format! 里 {{ }} 转义后应为单花括号）
+        let opens = s.chars().filter(|c| *c == '{').count();
+        let closes = s.chars().filter(|c| *c == '}').count();
+        assert_eq!(opens, closes, "花括号不成对，脚本无法解析");
+        assert!(!s.contains("{{"));
+        assert!(!s.contains("}}"));
+        // JSON 输出规范：-InputObject + [Console]::Out.Write（勿回退到管道/Write-Output）
+        assert!(s.contains("ConvertTo-Json -InputObject $out"));
+        assert!(s.contains("[Console]::Out.Write"));
+    }
+
     /* ---------- 真正调用 PowerShell 的集成测试 ---------- */
 
     #[test]
@@ -550,5 +687,34 @@ mod tests {
             assert!(!t.name.is_empty(), "任务名为空: {t:?}");
             assert!(t.path.starts_with('\\'), "任务路径异常: {t:?}");
         }
+    }
+
+    /// 需要能访问本机事件日志，默认跳过：
+    /// `cargo test -- --ignored`
+    /// 历史记录未启用时应返回 `history_enabled = false` + 空列表，而不是报错。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "需要能访问本机事件日志"]
+    fn task_history_roundtrip_against_real_event_log() {
+        let payload = task_history(None).expect("应能读取执行历史");
+        for r in &payload.rows {
+            assert!(!r.task_name.is_empty(), "执行记录任务名为空: {r:?}");
+            assert!(
+                matches!(
+                    r.status.as_str(),
+                    "running" | "done" | "failed" | "start_failed" | "unknown"
+                ),
+                "未知执行状态: {r:?}"
+            );
+        }
+        let filtered =
+            task_history(Some("win-timer-selftest-nonexistent")).expect("过滤查询应成功");
+        assert!(
+            filtered
+                .rows
+                .iter()
+                .all(|r| r.task_name == "win-timer-selftest-nonexistent"),
+            "按任务名过滤后不应出现其他任务: {filtered:?}"
+        );
     }
 }

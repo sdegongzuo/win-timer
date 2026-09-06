@@ -3,6 +3,7 @@ import type {
   CreateResponse,
   CreateTaskInput,
   ErrorBody,
+  HistoryResponse,
   TaskListResponse,
   TaskSummary,
 } from './types'
@@ -65,4 +66,10 @@ export async function runVerb(
 export async function deleteTask(name: string, path: string): Promise<void> {
   const qs = path && path !== '\\' ? `?path=${encodeURIComponent(path)}` : ''
   await request<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(name)}${qs}`, { method: 'DELETE' })
+}
+
+/** 读取任务执行历史；task 可选，按任务名精确过滤 */
+export async function fetchHistory(task?: string): Promise<HistoryResponse> {
+  const qs = task ? `?task=${encodeURIComponent(task)}` : ''
+  return request<HistoryResponse>(`/api/history${qs}`)
 }

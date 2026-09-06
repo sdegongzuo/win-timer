@@ -100,6 +100,15 @@ def main():
     st, body = call("POST", f"/tasks/nuke/{NAME}")
     check("未知操作返回结构化错误", st == 500 and "error" in body, f"HTTP {st} {body}")
 
+    # 7.5) 执行历史：接口可用且结构正确（历史记录未启用时允许空列表）
+    st, body = call("GET", "/history")
+    ok = st == 200 and "history_enabled" in body and "rows" in body
+    check("执行历史接口返回结构正确", ok, f"HTTP {st} {str(body)[:120]}")
+
+    st, body = call("GET", "/history?task=win-timer-selftest-nonexistent")
+    ok = st == 200 and body.get("rows") == []
+    check("执行历史按任务名过滤", ok, f"HTTP {st} {str(body)[:120]}")
+
     # 8) interval / daily 两条调度路径也要能落库
     for ty, extra in (("interval", {"every_minutes": 10}),
                       ("daily", {"at": (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M")})):

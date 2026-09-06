@@ -40,3 +40,18 @@ export interface CreateResponse {
 export interface ErrorBody {
   error: string
 }
+
+/** 单次执行记录（来自任务计划程序事件日志） */
+export interface RunRecord {
+  task_name: string
+  start_time: string | null
+  end_time: string | null
+  result_code: number | null
+  status: 'running' | 'done' | 'failed' | 'start_failed' | 'unknown'
+}
+
+export interface HistoryResponse {
+  /** 任务计划程序的历史记录开关是否已启用 */
+  history_enabled: boolean
+  rows: RunRecord[]
+}

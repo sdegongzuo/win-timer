@@ -97,6 +97,20 @@ async fn delete_task(
     Ok(Json(json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+struct HistoryQuery {
+    /// 可选：按任务名精确过滤
+    task: Option<String>,
+}
+
+async fn get_history(q: Query<HistoryQuery>) -> Result<Json<serde_json::Value>, ApiError> {
+    let payload = tasks::task_history(q.task.as_deref())?;
+    Ok(Json(json!({
+        "history_enabled": payload.history_enabled,
+        "rows": payload.rows,
+    })))
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -116,6 +130,7 @@ async fn main() {
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{name}", delete(delete_task))
         .route("/api/tasks/{verb}/{name}", post(task_verb))
+        .route("/api/history", get(get_history))
         .layer(cors);
 
     // 端口刻意选在 49152-65535 动态段，避开 8080/3000/5173 等常见开发端口。

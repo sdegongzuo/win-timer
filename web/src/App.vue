@@ -4,11 +4,12 @@ import {
   createTask,
   deleteTask,
   fetchHealth,
+  fetchHistory,
   listTasks,
   runVerb,
 } from './api'
 import { BACKEND_PORT } from './config'
-import type { TaskSummary } from './types'
+import type { HistoryResponse, RunRecord, TaskSummary } from './types'
 
 const tasks = ref<TaskSummary[]>([])
 const loading = ref(false)
@@ -142,6 +143,51 @@ async function submitCreate() {
 const runningVerb = (verb: string, t: TaskSummary) => busyName.value === `${verb}:${t.path}${t.name}`
 const deletingVerb = (t: TaskSummary) => busyName.value === `del:${t.path}${t.name}`
 
+/* ---------------- history modal ---------------- */
+const showHistory = ref(false)
+const historyLoading = ref(false)
+const historyError = ref<string | null>(null)
+const historyEnabled = ref(true)
+const historyRows = ref<RunRecord[]>([])
+/** null = 全部任务；否则为任务名 */
+const historyTask = ref<string | null>(null)
+
+async function openHistory(t?: TaskSummary) {
+  historyTask.value = t ? t.name : null
+  historyError.value = null
+  showHistory.value = true
+  await loadHistory()
+}
+
+async function loadHistory() {
+  historyLoading.value = true
+  historyError.value = null
+  try {
+    const data: HistoryResponse = await fetchHistory(historyTask.value ?? undefined)
+    historyEnabled.value = data.history_enabled
+    historyRows.value = data.rows ?? []
+  } catch (e) {
+    historyError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+function histStatus(r: RunRecord): { text: string; cls: string } {
+  switch (r.status) {
+    case 'done':
+      return { text: '成功', cls: 'badge ready' }
+    case 'failed':
+      return { text: '失败', cls: 'badge failed' }
+    case 'start_failed':
+      return { text: '启动失败', cls: 'badge failed' }
+    case 'running':
+      return { text: '运行中/等待结果', cls: 'badge running' }
+    default:
+      return { text: '未知', cls: 'badge unknown' }
+  }
+}
+
 const filteredCount = computed(() => tasks.value.length)
 
 /* auto refresh + health probe */
@@ -195,6 +241,7 @@ onUnmounted(() => {
         </div>
         <div class="right">
           <button class="btn ghost" :disabled="loading" @click="refresh()">⟳ 刷新</button>
+          <button class="btn ghost" @click="openHistory()">📜 执行历史</button>
           <button class="btn primary" @click="openCreate">＋ 新建任务</button>
         </div>
       </div>
@@ -263,6 +310,7 @@ onUnmounted(() => {
                 <button v-else class="mini accent" @click="act('enable', t)">
                   {{ runningVerb('enable', t) ? '…' : '启用' }}
                 </button>
+                <button class="mini" @click="openHistory(t)">历史</button>
                 <button class="mini danger" :disabled="deletingVerb(t)" @click="onDelete(t)">
                   {{ deletingVerb(t) ? '…' : '删除' }}
                 </button>
@@ -340,6 +388,55 @@ onUnmounted(() => {
             </button>
           </div>
         </form>
+      </div>
+    </div>
+    <!-- history modal -->
+    <div v-if="showHistory" class="overlay" @click.self="showHistory = false">
+      <div class="modal history-modal">
+        <h2>执行历史{{ historyTask ? `：${historyTask}` : '' }}</h2>
+        <p v-if="!historyEnabled" class="warn-hint">
+          任务计划程序的「历史记录」当前未启用，看不到执行明细。可打开 Windows「任务计划程序」，
+          在右侧操作栏点击「启用所有任务历史记录」后重试。
+        </p>
+        <div v-if="historyError" class="banner error modal-banner">{{ historyError }}</div>
+
+        <div class="history-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>开始时间</th>
+                <th>结束时间</th>
+                <th>结果</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="historyLoading">
+                <td colspan="5" class="empty">加载中…</td>
+              </tr>
+              <tr v-else-if="historyRows.length === 0">
+                <td colspan="5" class="empty">暂无执行记录。</td>
+              </tr>
+              <tr v-for="(r, i) in historyRows" :key="i">
+                <td class="name">{{ r.task_name }}</td>
+                <td>{{ fmt(r.start_time) }}</td>
+                <td>{{ fmt(r.end_time) }}</td>
+                <td>
+                  <span :class="resultText(r.result_code).cls">{{ resultText(r.result_code).text }}</span>
+                </td>
+                <td>
+                  <span :class="histStatus(r).cls">{{ histStatus(r).text }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn ghost" :disabled="historyLoading" @click="loadHistory()">⟳ 刷新</button>
+          <button class="btn primary" @click="showHistory = false">关闭</button>
+        </div>
       </div>
     </div>
   </div>
