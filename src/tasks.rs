@@ -168,7 +168,14 @@ try {{
       try {{ $start = ([datetime]$trig0.StartBoundary).ToString('yyyy-MM-ddTHH:mm:ss') }} catch {{}}
       if ($null -ne $trig0.Repetition -and $null -ne $trig0.Repetition.Interval -and $trig0.Repetition.Interval -ne [timespan]::Zero) {{
         $stype = 'interval'
-        try {{ $ivmin = [int]$trig0.Repetition.Interval.TotalSeconds }} catch {{}}
+        # Repetition.Interval 是 ISO8601 时长字符串（如 PT30M、PT1H40M），不是
+        # TimeSpan；对它取 .TotalSeconds 会得到 $null（转成 int 变 0），导致
+        # interval_minutes 恒为 0。用 XmlConvert 解析成 TimeSpan 再取分钟。
+        try {{
+          $ivRaw = $trig0.Repetition.Interval
+          $span = if ($ivRaw -is [string]) {{ [System.Xml.XmlConvert]::ToTimeSpan($ivRaw) }} else {{ [timespan]$ivRaw }}
+          $ivmin = [int]$span.TotalMinutes
+        }} catch {{}}
       }} elseif ($trig0.CimClass.CimClassName -eq 'MSFT_TaskDailyTrigger') {{
         $stype = 'daily'
       }} else {{
