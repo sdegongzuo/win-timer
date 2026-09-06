@@ -41,7 +41,7 @@ python e2e_smoke.py
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查 |
-| GET | `/api/tasks?scope=root\|all` | 列出任务，`root` 只含根目录 `\` |
+| GET | `/api/tasks?scope=root\|all` | 列出任务，`root` 只含根目录 `\`。结果带 30 秒 TTL 缓存（`src/main.rs` 的 `LIST_CACHE_TTL`），创建/删除/启停/编辑会立即失效缓存；PowerShell 枚举在 `spawn_blocking` 中执行 |
 | POST | `/api/tasks` | 创建任务 |
 | DELETE | `/api/tasks/{name}?path=\` | 删除任务 |
 | POST | `/api/tasks/{verb}/{name}?path=\` | `verb` ∈ `run`\|`end`\|`enable`\|`disable` |

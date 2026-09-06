@@ -52,8 +52,8 @@ body {
   justify-content: space-between;
   padding: 16px 28px;
   border-bottom: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.78);
-  backdrop-filter: blur(6px);
+  /* 不用 backdrop-filter：吸顶元素每帧重新模糊背景，长列表滚动时会明显卡顿 */
+  background: var(--panel);
   position: sticky;
   top: 0;
   z-index: 5;

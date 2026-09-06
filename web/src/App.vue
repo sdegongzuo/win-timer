@@ -19,13 +19,23 @@ const scope = ref<'root' | 'all'>('root')
 const error = ref<string | null>(null)
 const busyName = ref<string | null>(null)
 
-async function refresh() {
-  loading.value = true
-  error.value = null
+/**
+ * silent = true 时不清空表格（不置 loading），用于自动轮询与动作后的原位刷新，
+ * 避免每次刷新都把 200+ 行 DOM 拆掉重建造成卡顿。
+ * 静默刷新失败也不弹错误横幅：保留旧数据展示，连接状态由顶栏健康指示灯提示；
+ * 错误横幅只留给用户主动触发的刷新与操作。
+ */
+async function refresh(silent = false) {
+  if (!silent) loading.value = true
+  if (!silent) error.value = null
   try {
     tasks.value = await listTasks(scope.value)
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    if (!silent) {
+      error.value = e instanceof Error ? e.message : String(e)
+    } else {
+      console.warn('自动刷新失败，保留旧数据', e)
+    }
   } finally {
     loading.value = false
   }
@@ -59,7 +69,7 @@ async function act(verb: 'run' | 'end' | 'enable' | 'disable', t: TaskSummary) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
     busyName.value = null
-    await refresh()
+    await refresh(true)
   }
 }
 
@@ -74,7 +84,7 @@ async function onDelete(t: TaskSummary) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
     busyName.value = null
-    await refresh()
+    await refresh(true)
   }
 }
 
@@ -217,16 +227,26 @@ const filteredCount = computed(() => tasks.value.length)
 
 /* auto refresh + health probe */
 let timer: number | undefined
+
+/** 页面切回可见时立即静默补一次刷新，弥补后台暂停期间的空窗 */
+function onVisibleChange() {
+  if (!document.hidden) refresh(true)
+}
+
 onMounted(async () => {
+  document.addEventListener('visibilitychange', onVisibleChange)
   backendOk.value = await fetchHealth()
   await refresh()
   timer = window.setInterval(async () => {
+    // 页面不可见时跳过轮询：后台刷新没有意义，还会周期性触发后端 PowerShell 枚举
+    if (document.hidden) return
     backendOk.value = await fetchHealth()
-    await refresh()
+    await refresh(true)
   }, 15000)
 })
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
+  document.removeEventListener('visibilitychange', onVisibleChange)
 })
 </script>
 
